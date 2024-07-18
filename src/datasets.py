@@ -16,6 +16,7 @@ import torch.utils.data
 from torchvision.transforms import RandomCrop
 from torchvision import transforms as tf
 from torch.utils.data import Dataset
+import random
 
 
 from src.utils import RepresentationType, VoxelGrid, flow_16bit_to_float
@@ -316,6 +317,21 @@ class Sequence(Dataset):
         assert y.max() < self.height
         return rectify_map[y, x]
     
+    def drop_time(self, time_data):
+        if len(time_data) == 0:
+            return time_data
+        
+        ratio = np.random.randint(1,10)/10.0
+        data_num = time_data.shape[0]
+        drop_num = int(data_num * ratio)
+        idx = random.sample(list(np.arange(0, data_num)), data_num-drop_num)
+        return time_data[idx], idx
+    
+    def drop_event(self, event_data, idx):
+        if len(event_data) == 0:
+            return event_data
+        return event_data[idx]
+    
     def get_data(self, index) -> Dict[str, any]:
         ts_start: int = self.timestamps_flow[index] - self.delta_t_us
         ts_end: int = self.timestamps_flow[index]
@@ -336,6 +352,11 @@ class Sequence(Dataset):
         t = event_data['t']
         x = event_data['x']
         y = event_data['y']
+        
+        t, idx = self.drop_time(t)
+        p = self.drop_event(p, idx)
+        x = self.drop_event(x, idx)
+        y = self.drop_event(y, idx)
 
         xy_rect = self.rectify_events(x, y)
         x_rect = xy_rect[:, 0]

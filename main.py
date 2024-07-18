@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Any
 import os
 import time
+import torch.nn.functional as F
 
 
 class RepresentationType(Enum):
@@ -27,14 +28,14 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
 
-def compute_epe_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor):
+def compute_epe_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor, eps=1e-6):
     '''
     end-point-error (ground truthと予測値の二乗誤差)を計算
     pred_flow: torch.Tensor, Shape: torch.Size([B, 2, 480, 640]) => 予測したオプティカルフローデータ
     gt_flow: torch.Tensor, Shape: torch.Size([B, 2, 480, 640]) => 正解のオプティカルフローデータ
     '''
     epe = torch.mean(torch.mean(torch.norm(pred_flow - gt_flow, p=2, dim=1), dim=(1, 2)), dim=0)
-    return epe
+    return epe + eps
 
 def save_optical_flow_to_npy(flow: torch.Tensor, file_name: str):
     '''
@@ -43,6 +44,9 @@ def save_optical_flow_to_npy(flow: torch.Tensor, file_name: str):
     file_name: str => ファイル名
     '''
     np.save(f"{file_name}.npy", flow.cpu().numpy())
+
+def resize_flow(pred_flow: torch.Tensor, target_size):
+    return F.interpolate(pred_flow, size=target_size, mode='bilinear', align_corners=False)
 
 @hydra.main(version_base=None, config_path="configs", config_name="base")
 def main(args: DictConfig):
@@ -127,13 +131,18 @@ def main(args: DictConfig):
             batch: Dict[str, Any]
             event_image = batch["event_volume"].to(device) # [B, 4, 480, 640]
             ground_truth_flow = batch["flow_gt"].to(device) # [B, 2, 480, 640]
-            flow = model(event_image) # [B, 2, 480, 640]
-            loss: torch.Tensor = compute_epe_error(flow, ground_truth_flow)
-            print(f"batch {i} loss: {loss.item()}")
+            flow, flow_dict = model(event_image) # [B, 2, 480, 640]
+            target_size = flow.shape[-2:]
+            loss: torch.Tensor = 0.8 * compute_epe_error(flow, ground_truth_flow)
+            loss_ff = loss.clone()
+            loss += 0.05 * compute_epe_error(resize_flow(flow_dict['flow0'], target_size), ground_truth_flow)
+            loss += 0.05 * compute_epe_error(resize_flow(flow_dict['flow1'], target_size), ground_truth_flow)
+            loss += 0.1 * compute_epe_error(resize_flow(flow_dict['flow2'], target_size), ground_truth_flow)
+            print(f"batch {i} loss: {loss.item()} final loss: {loss_ff.item()}")
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
+            
             total_loss += loss.item()
         print(f'Epoch {epoch+1}, Loss: {total_loss / len(train_data)}')
 
@@ -157,7 +166,7 @@ def main(args: DictConfig):
         for batch in tqdm(test_data):
             batch: Dict[str, Any]
             event_image = batch["event_volume"].to(device)
-            batch_flow = model(event_image) # [1, 2, 480, 640]
+            batch_flow, _ = model(event_image) # [1, 2, 480, 640]
             flow = torch.cat((flow, batch_flow), dim=0)  # [N, 2, 480, 640]
         print("test done")
     # ------------------
